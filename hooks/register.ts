@@ -1,0 +1,242 @@
+import { atom, read, update } from 'claude-code'
+import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
+import type { Pause, Quota } from '../types'
+
+const PERSON_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge', 'slack-ping'])
+const USAGE = 'Usage: /pause [compact | status], or /pause limit [<percent> [resume] | off]'
+const WINDOW_NAMES: Readonly<Record<string, string>> = { five_hour: '5-hour', seven_day: 'weekly' }
+const RESUME_PROMPT = 'The quota window has reset. Continue where you left off.'
+// The reset time is the server's; the margin keeps the resumed turn past it.
+const RESUME_MARGIN_MS = 60_000
+const RESUME_POLL_MS = 60_000
+
+// Held by the host, so the pause outlives a reload of this module.
+const pause = atom({ plugin: 'dymaxion', key: 'state' } as const, {
+  isPaused: false,
+  runningTurnId: null,
+  abortedTurnId: null,
+  nextTurnOrigin: null,
+  windowsAtLimit: [],
+  sessionQuota: null,
+  resumeAt: null,
+})
+
+// A value an earlier version of the mod wrote lacks the fields added since.
+function current(s: Pause): Pause {
+  return { ...pause.initial, ...s }
+}
+
+async function load($: EngineInterface) {
+  return current(await read($, pause))
+}
+
+// Holds until the person's prompt; a quota pause sets resumeAt after it.
+function paused(s: Pause): Pause {
+  return { ...s, isPaused: true, nextTurnOrigin: null, resumeAt: null }
+}
+
+// windowsAtLimit is emptied so a window still at the limit pauses the session again.
+function resumed(s: Pause): Pause {
+  return { ...s, isPaused: false, resumeAt: null, windowsAtLimit: [] }
+}
+
+function atLimit(windows: readonly SessionRateLimit[], quota: Quota) {
+  return quota.percent > 0 ? windows.filter(w => w.percentUsed >= quota.percent) : []
+}
+
+// When every one of `windows` has reset; null when one does not say.
+function resetOf(windows: readonly SessionRateLimit[]) {
+  const times = windows.map(w => (w.resetsAt === undefined ? NaN : Date.parse(w.resetsAt)))
+  return times.some(Number.isNaN) ? null : Math.max(...times)
+}
+
+function quotaText(q: Quota) {
+  if (q.percent <= 0) return 'does not pause for quota'
+  return `pauses at ${q.percent}% of a quota window${q.isResuming ? ' and resumes when it resets' : ''}`
+}
+
+function isRunning(s: Pause) {
+  return s.runningTurnId !== null && s.runningTurnId !== s.abortedTurnId
+}
+
+function statusOf(s: Pause) {
+  if (!s.isPaused) return undefined
+  return isRunning(s) ? 'pausing' : 'paused'
+}
+
+// Also answers the state the write replaced, so of two callers racing to make
+// the same change, each can tell whether it was the one that made it.
+async function write($: EngineInterface, change: (s: Pause) => Pause) {
+  let before = pause.initial
+  const after = await update($, pause, s => change((before = current(s))))
+  if (statusOf(after) !== statusOf(before)) $.ui.status(statusOf(after))
+
+  return { before, after }
+}
+
+// Parallel tool calls of one response each stop the turn; only the first aborts it.
+async function stop($: EngineInterface, turnId: string) {
+  const { before } = await write($, s => ({ ...s, abortedTurnId: turnId }))
+  if (before.abortedTurnId !== turnId) await $.turn.abort({ turnId })
+}
+
+async function resumeIfDue($: EngineInterface) {
+  const now = await $.clock.now()
+  const s = await load($)
+  if (s.resumeAt === null || now < s.resumeAt) return
+  const { before } = await write($, t => (t.resumeAt === null ? t : resumed(t)))
+  if (before.resumeAt !== null) await $.prompt.submit({ text: RESUME_PROMPT })
+}
+
+async function runLimit($: EngineInterface, args: readonly string[], setting: Quota) {
+  const [value, mode, ...rest] = args
+  if (value === undefined) return { text: `This session ${quotaText((await load($)).sessionQuota ?? setting)}.` }
+  const percent = value === 'off' ? 0 : Number(value)
+  const isResuming = mode === 'resume'
+  const isValid = percent >= 0 && percent <= 100 && rest.length === 0 && (mode === undefined || (isResuming && percent > 0))
+  if (!isValid) return { text: USAGE }
+  const quota = { percent, isResuming }
+  await write($, s => ({ ...s, sessionQuota: quota, resumeAt: isResuming ? s.resumeAt : null }))
+
+  return { text: `This session ${quotaText(quota)}.` }
+}
+
+async function runStatus($: EngineInterface, setting: Quota) {
+  const s = await load($)
+  const { rateLimits } = await $.session.usage()
+  const pauseLine = !s.isPaused
+    ? 'Not paused.'
+    : isRunning(s)
+      ? 'Pausing: Claude stops before its next step.'
+      : s.resumeAt === null
+        ? 'Paused until you send a prompt.'
+        : `Paused until ${new Date(s.resumeAt).toISOString()}, or until you send a prompt.`
+  const source = s.sessionQuota === null ? 'from the settings' : 'set by /pause limit'
+  const windowLines = rateLimits.map(w => {
+    const resets = w.resetsAt === undefined ? '' : `, resets ${w.resetsAt}`
+    const held = s.windowsAtLimit.includes(w.kind) ? '; paused for it once, again only after it resets' : ''
+    return `${WINDOW_NAMES[w.kind] ?? w.kind} limit: ${w.percentUsed}% used${resets}${held}`
+  })
+
+  return {
+    text: [pauseLine, `Quota: this session ${quotaText(s.sessionQuota ?? setting)} (${source}).`, ...windowLines].join(
+      '\n',
+    ),
+  }
+}
+
+export const register: Register = (on, options) => {
+  const setting: Quota = {
+    percent: typeof options.quotaLimit === 'number' ? options.quotaLimit : 0,
+    isResuming: options.quotaResume === true,
+  }
+
+  on('session.start', async ($, e, next) => {
+    await $.command.register({
+      name: 'pause',
+      description: 'Stop once the running tool finishes and stay paused until you send a prompt',
+      argumentHint: '[compact | status | limit <percent> [resume] | limit off]',
+      immediate: true,
+    })
+    // After a reload, show the pause the host still holds.
+    $.ui.status(statusOf(await load($)))
+    // Polled rather than one long wait, so a machine that slept past a reset
+    // still resumes soon after it wakes.
+    $.clock.every(RESUME_POLL_MS, () => void resumeIfDue($))
+
+    return next(e)
+  })
+
+  on('command.run', { command: 'pause' }, async ($, e) => {
+    const [verb = '', ...rest] = e.args.trim().split(/\s+/)
+    if (verb === 'limit') return runLimit($, rest, setting)
+    if (verb === 'status' && rest.length === 0) return runStatus($, setting)
+    if (rest.length > 0 || (verb !== '' && verb !== 'compact')) return { text: USAGE }
+    const isCompacting = verb === 'compact'
+
+    const { after } = await write($, paused)
+    // Queued until the session is idle: it runs once the turn stops, while the prompt cache is warm.
+    if (isCompacting) $.clock.after(0, () => void $.command.run({ command: 'compact' }))
+    if (!isRunning(after)) {
+      return { text: isCompacting ? 'Paused; compacting now.' : 'Paused until you send a prompt.' }
+    }
+
+    return {
+      text: isCompacting
+        ? 'Claude will stop before its next step, then compact.'
+        : 'Claude will stop before its next step.',
+    }
+  })
+
+  // A window pauses the session when it reaches the limit, which is off unless
+  // set. Once the session resumes, the same window pauses it again only after
+  // it has reset. A pause holding for the person's prompt keeps holding.
+  on('session.measure', async ($, e, next) => {
+    const now = await $.clock.now()
+    const { before, after } = await write($, s => {
+      const quota = s.sessionQuota ?? setting
+      const windows = atLimit(e.rateLimits, quota)
+      const t = { ...s, windowsAtLimit: windows.map(w => w.kind) }
+      if (!windows.some(w => !s.windowsAtLimit.includes(w.kind))) return t
+      if (s.isPaused && s.resumeAt === null) return t
+      const reset = quota.isResuming ? resetOf(windows) : null
+
+      return { ...paused(t), resumeAt: reset !== null && reset > now ? reset + RESUME_MARGIN_MS : null }
+    })
+    const reached = atLimit(e.rateLimits, before.sessionQuota ?? setting).find(
+      w => !before.windowsAtLimit.includes(w.kind),
+    )
+    if (reached !== undefined) {
+      const name = WINDOW_NAMES[reached.kind] ?? reached.kind
+      const then =
+        after.resumeAt === null ? 'Send a prompt to go on.' : `Resuming at ${new Date(after.resumeAt).toISOString()}.`
+      $.ui.toast(`Pausing: the ${name} limit is at ${reached.percentUsed}%. ${then}`)
+    }
+
+    return next(e)
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    if (e.turnId === undefined) await write($, s => ({ ...s, nextTurnOrigin: e.origin.kind }))
+
+    return next(e)
+  })
+
+  on('turn.start', async ($, e, next) => {
+    const started = await next(e)
+    if (e.agentId !== undefined) return started
+
+    await write($, s => {
+      const t = { ...s, runningTurnId: started.turnId, nextTurnOrigin: null }
+      return s.isPaused && PERSON_ORIGINS.has(s.nextTurnOrigin ?? '') ? { ...t, isPaused: false, resumeAt: null } : t
+    })
+
+    return started
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    if (e.agentId === undefined) {
+      await write($, s => (s.runningTurnId === e.turnId ? { ...s, runningTurnId: null } : s))
+    }
+
+    return next(e)
+  })
+
+  // The two boundaries of the main loop: the next model request, and the next
+  // tool of a response whose earlier tools ran one after another.
+  on('turn.step', async function* ($, e, next) {
+    if (e.agentId !== undefined || !(await load($)).isPaused) return yield* next(e)
+    await stop($, e.turnId)
+
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
+  })
+
+  on('tool.call', async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    const s = await load($)
+    if (!s.isPaused || s.runningTurnId === null) return next(e)
+    await stop($, s.runningTurnId)
+
+    return { deny: 'Paused.' }
+  })
+}

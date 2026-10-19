@@ -1,0 +1,23 @@
+{
+  "name": "dymaxion",
+  "version": "0.1.0",
+  "description": "/pause stops Claude at its next step without adding to the context, and stays paused until you send a prompt; optionally pauses at a quota limit and resumes when the quota resets",
+  "author": {
+    "name": "nvartolomei"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "quotaLimit": {
+      "type": "number",
+      "title": "Pause at quota percent",
+      "description": "Pause when the 5-hour or weekly limit reaches this percent. 0 turns it off. /pause limit changes it for one session.",
+      "default": 0
+    },
+    "quotaResume": {
+      "type": "boolean",
+      "title": "Resume when the quota resets",
+      "description": "After a quota pause, send a prompt to continue once the window that paused the session resets.",
+      "default": false
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "claude-dymaxion",
+  "owner": { "name": "nvartolomei" },
+  "description": "Pause Claude Code at its next step, by hand or at a quota limit",
+  "plugins": [{ "name": "dymaxion", "source": "./" }]
+}
