@@ -44,6 +44,6 @@ Set these with `/plugin configure dymaxion@claude-dymaxion` to apply them to eve
 
 ## Notes
 
-- Claude Code resumes only on a prompt, so the automatic resume sends one: "The quota window has reset. Continue where you left off."
+- Claude Code resumes only on a prompt, so after a quota pause the automatic resume sends one: "The quota window has reset. Continue where you left off." A pause you made with `/pause` never resumes on its own.
 - Only the main conversation pauses. Running subagents continue until they finish.
 - If you resume a session yourself, Claude works past the limit until that window resets, and any scheduled resume is dropped. The settings stay on: the next time the window reaches the limit, the session pauses and resumes as before.
