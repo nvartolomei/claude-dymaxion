@@ -366,13 +366,36 @@ test('the status line follows /pause limit', async ($, on) => {
   expect(seen.status).toBeUndefined()
 })
 
+test('/pause until-reset waits for the most-used window to reset, then continues', async ($, on) => {
+  const seen = engine(on)
+  await start($)
+
+  expect((await pause($, 'until-reset')).text).toBe('Paused until 2026-10-20T01:01:00.000Z, after the 5-hour window resets.')
+  await turn($, 't1', { kind: 'task-notification' })
+  await step($, { turnId: 't1', index: 0, ...STEP })
+  expect(seen.requests).toBe(0)
+  await seen.clock.set(T0 + 5 * HOUR)
+  expect(seen.prompts).toEqual([])
+  await seen.clock.set(T0 + 5 * HOUR + 2 * MINUTE)
+  expect(seen.prompts).toEqual([RESUME_PROMPT])
+})
+
+test('/pause until-reset with a prompt sends that prompt at the reset', async ($, on) => {
+  const seen = engine(on)
+  await start($)
+
+  await pause($, 'until-reset  yes, go with option 2')
+  await seen.clock.set(T0 + 5 * HOUR + 2 * MINUTE)
+  expect(seen.prompts).toEqual(['yes, go with option 2'])
+})
+
 test('/pause rejects unknown arguments', async ($, on) => {
   engine(on)
 
   await turn($, 't1', { kind: 'composer' })
-  const invalid = ['now', 'compact now', 'status now', 'limit high', 'limit 120', 'limit 95 now', 'limit off resume']
+  const invalid = ['now', 'resume', 'compact now', 'status now', 'limit high', 'limit 120', 'limit 95 now', 'limit off resume']
   for (const args of invalid) {
-    expect((await pause($, args)).text).toBe('Usage: /pause [compact | status], or /pause limit [<percent> [resume] | off]')
+    expect((await pause($, args)).text).toBe('Usage: /pause [compact | status | until-reset [<prompt>]], or /pause limit [<percent> [resume] | off]')
   }
   expect((await $.tool.call(BASH)).deny).toBeUndefined()
 })

@@ -13,8 +13,8 @@ export type Pause = {
   windowsAtLimit: string[]
   /** The quota /pause limit set for this session; null follows the settings. */
   sessionQuota: Quota | null
-  /** When a quota pause resumes on its own, in epoch milliseconds; null holds until a prompt. */
-  resumeAt: number | null
+  /** When a pause resumes on its own (epoch milliseconds) and the prompt it sends; null holds until the person's prompt. */
+  resume: { at: number; prompt: string } | null
 }
 
 declare module 'claude-code' {

@@ -3,7 +3,7 @@ import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
 import type { Pause, Quota } from '../types'
 
 const PERSON_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge', 'slack-ping'])
-const USAGE = 'Usage: /pause [compact | status], or /pause limit [<percent> [resume] | off]'
+const USAGE = 'Usage: /pause [compact | status | until-reset [<prompt>]], or /pause limit [<percent> [resume] | off]'
 const WINDOW_NAMES: Readonly<Record<string, string>> = { five_hour: '5-hour', seven_day: 'weekly' }
 const RESUME_PROMPT = 'The quota window has reset. Continue where you left off.'
 // The reset time is the server's; the margin keeps the resumed turn past it.
@@ -18,7 +18,7 @@ const pause = atom({ plugin: 'dymaxion', key: 'state' } as const, {
   nextTurnOrigin: null,
   windowsAtLimit: [],
   sessionQuota: null,
-  resumeAt: null,
+  resume: null,
 })
 
 // A value an earlier version of the mod wrote lacks the fields added since.
@@ -30,14 +30,14 @@ async function load($: EngineInterface) {
   return current(await read($, pause))
 }
 
-// Holds until the person's prompt; a quota pause sets resumeAt after it.
+// Holds until the person's prompt; a pause that resumes on its own sets resume after it.
 function paused(s: Pause): Pause {
-  return { ...s, isPaused: true, nextTurnOrigin: null, resumeAt: null }
+  return { ...s, isPaused: true, nextTurnOrigin: null, resume: null }
 }
 
 // windowsAtLimit is emptied so a window still at the limit pauses the session again.
 function resumed(s: Pause): Pause {
-  return { ...s, isPaused: false, resumeAt: null, windowsAtLimit: [] }
+  return { ...s, isPaused: false, resume: null, windowsAtLimit: [] }
 }
 
 function atLimit(windows: readonly SessionRateLimit[], quota: Quota) {
@@ -62,7 +62,7 @@ function isRunning(s: Pause) {
 function statusOf(s: Pause, setting: Quota) {
   if (s.isPaused) {
     if (isRunning(s)) return 'pausing'
-    return s.resumeAt === null ? 'paused' : `paused until ${new Date(s.resumeAt).toISOString()}`
+    return s.resume === null ? 'paused' : `paused until ${new Date(s.resume.at).toISOString()}`
   }
   const quota = s.sessionQuota ?? setting
   return quota.percent > 0 && quota.isResuming ? `pauses at ${quota.percent}%, resumes at reset` : undefined
@@ -88,9 +88,26 @@ async function stop($: EngineInterface, setting: Quota, turnId: string) {
 async function resumeIfDue($: EngineInterface, setting: Quota) {
   const now = await $.clock.now()
   const s = await load($)
-  if (s.resumeAt === null || now < s.resumeAt) return
-  const { before } = await write($, setting, t => (t.resumeAt === null ? t : resumed(t)))
-  if (before.resumeAt !== null) await $.prompt.submit({ text: RESUME_PROMPT })
+  if (s.resume === null || now < s.resume.at) return
+  const { before } = await write($, setting, t => (t.resume === null ? t : resumed(t)))
+  if (before.resume !== null) await $.prompt.submit({ text: before.resume.prompt })
+}
+
+// Waits for the most-used window, the one holding the session back; of several
+// used as much, for the last to reset.
+async function runUntilReset($: EngineInterface, setting: Quota, prompt: string) {
+  const { rateLimits } = await $.session.usage()
+  const most = Math.max(...rateLimits.map(w => w.percentUsed))
+  const windows = rateLimits.filter(w => w.percentUsed === most)
+  const reset = windows.length === 0 ? null : resetOf(windows)
+  if (reset === null || reset <= (await $.clock.now())) {
+    return { text: 'No quota reading gives a reset still to come, so there is nothing to wait for.' }
+  }
+  const at = reset + RESUME_MARGIN_MS
+  await write($, setting, s => ({ ...paused(s), resume: { at, prompt: prompt === '' ? RESUME_PROMPT : prompt } }))
+  const names = windows.map(w => WINDOW_NAMES[w.kind] ?? w.kind).join(' and ')
+
+  return { text: `Paused until ${new Date(at).toISOString()}, after the ${names} window resets.` }
 }
 
 async function runLimit($: EngineInterface, args: readonly string[], setting: Quota) {
@@ -101,7 +118,7 @@ async function runLimit($: EngineInterface, args: readonly string[], setting: Qu
   const isValid = percent >= 0 && percent <= 100 && rest.length === 0 && (mode === undefined || (isResuming && percent > 0))
   if (!isValid) return { text: USAGE }
   const quota = { percent, isResuming }
-  await write($, setting, s => ({ ...s, sessionQuota: quota, resumeAt: isResuming ? s.resumeAt : null }))
+  await write($, setting, s => ({ ...s, sessionQuota: quota, resume: isResuming ? s.resume : null }))
 
   return { text: `This session ${quotaText(quota)}.` }
 }
@@ -113,9 +130,9 @@ async function runStatus($: EngineInterface, setting: Quota) {
     ? 'Not paused.'
     : isRunning(s)
       ? 'Pausing: Claude stops before its next step.'
-      : s.resumeAt === null
+      : s.resume === null
         ? 'Paused until you send a prompt.'
-        : `Paused until ${new Date(s.resumeAt).toISOString()}, or until you send a prompt.`
+        : `Paused until ${new Date(s.resume.at).toISOString()}, or until you send a prompt.`
   const source = s.sessionQuota === null ? 'from the settings' : 'set by /pause limit'
   const windowLines = rateLimits.map(w => {
     const resets = w.resetsAt === undefined ? '' : `, resets ${w.resetsAt}`
@@ -140,7 +157,7 @@ export const register: Register = (on, options) => {
     await $.command.register({
       name: 'pause',
       description: 'Stop once the running tool finishes and stay paused until you send a prompt',
-      argumentHint: '[compact | status | limit <percent> [resume] | limit off]',
+      argumentHint: '[compact | status | until-reset [prompt] | limit <percent> [resume] | limit off]',
       immediate: true,
     })
     // After a reload, show the pause the host still holds.
@@ -156,6 +173,7 @@ export const register: Register = (on, options) => {
     const [verb = '', ...rest] = e.args.trim().split(/\s+/)
     if (verb === 'limit') return runLimit($, rest, setting)
     if (verb === 'status' && rest.length === 0) return runStatus($, setting)
+    if (verb === 'until-reset') return runUntilReset($, setting, e.args.trim().slice(verb.length).trim())
     if (rest.length > 0 || (verb !== '' && verb !== 'compact')) return { text: USAGE }
     const isCompacting = verb === 'compact'
 
@@ -175,7 +193,8 @@ export const register: Register = (on, options) => {
 
   // A window pauses the session when it reaches the limit, which is off unless
   // set. Once the session resumes, the same window pauses it again only after
-  // it has reset. A pause holding for the person's prompt keeps holding.
+  // it has reset. A pause holding for the person's prompt keeps holding; one
+  // that resumes on its own waits for this window too.
   on('session.measure', async ($, e, next) => {
     const now = await $.clock.now()
     const { before, after } = await write($, setting, s => {
@@ -183,10 +202,13 @@ export const register: Register = (on, options) => {
       const windows = atLimit(e.rateLimits, quota)
       const t = { ...s, windowsAtLimit: windows.map(w => w.kind) }
       if (!windows.some(w => !s.windowsAtLimit.includes(w.kind))) return t
-      if (s.isPaused && s.resumeAt === null) return t
-      const reset = quota.isResuming ? resetOf(windows) : null
+      const reset = resetOf(windows)
+      const at = reset !== null && reset > now ? reset + RESUME_MARGIN_MS : null
+      if (s.isPaused) {
+        return s.resume === null || at === null ? t : { ...t, resume: { ...s.resume, at: Math.max(s.resume.at, at) } }
+      }
 
-      return { ...paused(t), resumeAt: reset !== null && reset > now ? reset + RESUME_MARGIN_MS : null }
+      return { ...paused(t), resume: quota.isResuming && at !== null ? { at, prompt: RESUME_PROMPT } : null }
     })
     const reached = atLimit(e.rateLimits, before.sessionQuota ?? setting).find(
       w => !before.windowsAtLimit.includes(w.kind),
@@ -194,7 +216,7 @@ export const register: Register = (on, options) => {
     if (reached !== undefined) {
       const name = WINDOW_NAMES[reached.kind] ?? reached.kind
       const then =
-        after.resumeAt === null ? 'Send a prompt to go on.' : `Resuming at ${new Date(after.resumeAt).toISOString()}.`
+        after.resume === null ? 'Send a prompt to go on.' : `Resuming at ${new Date(after.resume.at).toISOString()}.`
       $.ui.toast(`Pausing: the ${name} limit is at ${reached.percentUsed}%. ${then}`)
     }
 
@@ -213,7 +235,7 @@ export const register: Register = (on, options) => {
 
     await write($, setting, s => {
       const t = { ...s, runningTurnId: started.turnId, nextTurnOrigin: null }
-      return s.isPaused && PERSON_ORIGINS.has(s.nextTurnOrigin ?? '') ? { ...t, isPaused: false, resumeAt: null } : t
+      return s.isPaused && PERSON_ORIGINS.has(s.nextTurnOrigin ?? '') ? { ...t, isPaused: false, resume: null } : t
     })
 
     return started

@@ -29,6 +29,7 @@ In the desktop app: click + next to the prompt box and choose Plugins. Click Add
 | `/pause` | Lets the running tool finish, then stops before the next model request or tool call. Claude stays paused until you send a prompt; notices from background agents wait until then. |
 | `/pause compact` | Pauses, then compacts the conversation while the prompt cache is warm. |
 | `/pause status` | Shows whether the session is paused, its quota limit, and how much of each quota window is used. |
+| `/pause until-reset [prompt]` | Pauses until the most-used quota window resets, then sends `prompt`, or the resume prompt below. Use it when a session waits on you at the limit. |
 | `/pause limit 90` | Pauses this session when the 5-hour or weekly window reaches 90%. |
 | `/pause limit 90 resume` | Same, and resumes on its own when the window resets. |
 | `/pause limit off` | Turns off the quota pause for this session. |
@@ -44,7 +45,7 @@ Set these with `/plugin configure dymaxion@claude-dymaxion` to apply them to eve
 
 ## Notes
 
-- Claude Code resumes only on a prompt, so after a quota pause the automatic resume sends one: "The quota window has reset. Continue where you left off." A pause you made with `/pause` never resumes on its own.
+- Claude Code resumes only on a prompt, so an automatic resume sends one: the prompt you gave `/pause until-reset`, or "The quota window has reset. Continue where you left off." A plain `/pause` never resumes on its own.
 - The status line under the prompt shows `pausing` or `paused`, `paused until <time>` when the pause resumes on its own, and `pauses at 90%, resumes at reset` while a quota limit that resumes is on.
 - Only the main conversation pauses. Running subagents continue until they finish.
 - If you resume a session yourself, Claude works past the limit until that window resets, and any scheduled resume is dropped. The settings stay on: the next time the window reaches the limit, the session pauses and resumes as before.
