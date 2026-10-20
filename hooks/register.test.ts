@@ -54,6 +54,7 @@ function engine(on: On) {
     aborted: [] as string[],
     commands: [] as string[],
     prompts: [] as string[],
+    status: undefined as string | undefined,
     clock: mock.clock(on, { now: T0 }),
   }
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -73,7 +74,10 @@ function engine(on: On) {
     return { turnId: e.turnId, index: e.index, answer: 'x', toolUses: [], stopReason: 'end_turn', usage: null }
   })
   on('tool.call', () => ({ result: { stdout: '', stderr: '', interrupted: false } }))
-  on('ui.status', () => ({ value: undefined }))
+  on('ui.status', ($, e) => {
+    seen.status = e.text
+    return { value: undefined }
+  })
   on('ui.toast', () => ({ value: undefined }))
   on('session.measure', ($, e) => ({ changed: e.changed }))
   on('session.usage', () => ({
@@ -338,6 +342,28 @@ test('a manual /pause holds through a quota pause that would resume', RESUME_90,
   await measure($, 90, T0 + HOUR)
   await seen.clock.advance(2 * HOUR)
   expect(seen.prompts).toEqual([])
+})
+
+test('the status line shows a quota limit that resumes, and when a pause resumes', RESUME_90, async ($, on) => {
+  const seen = engine(on)
+  await start($)
+
+  expect(seen.status).toBe('pauses at 90%, resumes at reset')
+  await measure($, 90, T0 + HOUR)
+  expect(seen.status).toBe('paused until 2026-10-19T21:01:00.000Z')
+  await seen.clock.advance(HOUR + 2 * MINUTE)
+  expect(seen.status).toBe('pauses at 90%, resumes at reset')
+})
+
+test('the status line follows /pause limit', async ($, on) => {
+  const seen = engine(on)
+  await start($)
+
+  expect(seen.status).toBeUndefined()
+  await pause($, 'limit 90 resume')
+  expect(seen.status).toBe('pauses at 90%, resumes at reset')
+  await pause($, 'limit 90')
+  expect(seen.status).toBeUndefined()
 })
 
 test('/pause rejects unknown arguments', async ($, on) => {

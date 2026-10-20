@@ -59,32 +59,37 @@ function isRunning(s: Pause) {
   return s.runningTurnId !== null && s.runningTurnId !== s.abortedTurnId
 }
 
-function statusOf(s: Pause) {
-  if (!s.isPaused) return undefined
-  return isRunning(s) ? 'pausing' : 'paused'
+function statusOf(s: Pause, setting: Quota) {
+  if (s.isPaused) {
+    if (isRunning(s)) return 'pausing'
+    return s.resumeAt === null ? 'paused' : `paused until ${new Date(s.resumeAt).toISOString()}`
+  }
+  const quota = s.sessionQuota ?? setting
+  return quota.percent > 0 && quota.isResuming ? `pauses at ${quota.percent}%, resumes at reset` : undefined
 }
 
 // Also answers the state the write replaced, so of two callers racing to make
 // the same change, each can tell whether it was the one that made it.
-async function write($: EngineInterface, change: (s: Pause) => Pause) {
+async function write($: EngineInterface, setting: Quota, change: (s: Pause) => Pause) {
   let before = pause.initial
   const after = await update($, pause, s => change((before = current(s))))
-  if (statusOf(after) !== statusOf(before)) $.ui.status(statusOf(after))
+  const status = statusOf(after, setting)
+  if (status !== statusOf(before, setting)) $.ui.status(status)
 
   return { before, after }
 }
 
 // Parallel tool calls of one response each stop the turn; only the first aborts it.
-async function stop($: EngineInterface, turnId: string) {
-  const { before } = await write($, s => ({ ...s, abortedTurnId: turnId }))
+async function stop($: EngineInterface, setting: Quota, turnId: string) {
+  const { before } = await write($, setting, s => ({ ...s, abortedTurnId: turnId }))
   if (before.abortedTurnId !== turnId) await $.turn.abort({ turnId })
 }
 
-async function resumeIfDue($: EngineInterface) {
+async function resumeIfDue($: EngineInterface, setting: Quota) {
   const now = await $.clock.now()
   const s = await load($)
   if (s.resumeAt === null || now < s.resumeAt) return
-  const { before } = await write($, t => (t.resumeAt === null ? t : resumed(t)))
+  const { before } = await write($, setting, t => (t.resumeAt === null ? t : resumed(t)))
   if (before.resumeAt !== null) await $.prompt.submit({ text: RESUME_PROMPT })
 }
 
@@ -96,7 +101,7 @@ async function runLimit($: EngineInterface, args: readonly string[], setting: Qu
   const isValid = percent >= 0 && percent <= 100 && rest.length === 0 && (mode === undefined || (isResuming && percent > 0))
   if (!isValid) return { text: USAGE }
   const quota = { percent, isResuming }
-  await write($, s => ({ ...s, sessionQuota: quota, resumeAt: isResuming ? s.resumeAt : null }))
+  await write($, setting, s => ({ ...s, sessionQuota: quota, resumeAt: isResuming ? s.resumeAt : null }))
 
   return { text: `This session ${quotaText(quota)}.` }
 }
@@ -139,10 +144,10 @@ export const register: Register = (on, options) => {
       immediate: true,
     })
     // After a reload, show the pause the host still holds.
-    $.ui.status(statusOf(await load($)))
+    $.ui.status(statusOf(await load($), setting))
     // Polled rather than one long wait, so a machine that slept past a reset
     // still resumes soon after it wakes.
-    $.clock.every(RESUME_POLL_MS, () => void resumeIfDue($))
+    $.clock.every(RESUME_POLL_MS, () => void resumeIfDue($, setting))
 
     return next(e)
   })
@@ -154,7 +159,7 @@ export const register: Register = (on, options) => {
     if (rest.length > 0 || (verb !== '' && verb !== 'compact')) return { text: USAGE }
     const isCompacting = verb === 'compact'
 
-    const { after } = await write($, paused)
+    const { after } = await write($, setting, paused)
     // Queued until the session is idle: it runs once the turn stops, while the prompt cache is warm.
     if (isCompacting) $.clock.after(0, () => void $.command.run({ command: 'compact' }))
     if (!isRunning(after)) {
@@ -173,7 +178,7 @@ export const register: Register = (on, options) => {
   // it has reset. A pause holding for the person's prompt keeps holding.
   on('session.measure', async ($, e, next) => {
     const now = await $.clock.now()
-    const { before, after } = await write($, s => {
+    const { before, after } = await write($, setting, s => {
       const quota = s.sessionQuota ?? setting
       const windows = atLimit(e.rateLimits, quota)
       const t = { ...s, windowsAtLimit: windows.map(w => w.kind) }
@@ -197,7 +202,7 @@ export const register: Register = (on, options) => {
   })
 
   on('prompt.submit', async ($, e, next) => {
-    if (e.turnId === undefined) await write($, s => ({ ...s, nextTurnOrigin: e.origin.kind }))
+    if (e.turnId === undefined) await write($, setting, s => ({ ...s, nextTurnOrigin: e.origin.kind }))
 
     return next(e)
   })
@@ -206,7 +211,7 @@ export const register: Register = (on, options) => {
     const started = await next(e)
     if (e.agentId !== undefined) return started
 
-    await write($, s => {
+    await write($, setting, s => {
       const t = { ...s, runningTurnId: started.turnId, nextTurnOrigin: null }
       return s.isPaused && PERSON_ORIGINS.has(s.nextTurnOrigin ?? '') ? { ...t, isPaused: false, resumeAt: null } : t
     })
@@ -216,7 +221,7 @@ export const register: Register = (on, options) => {
 
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
-      await write($, s => (s.runningTurnId === e.turnId ? { ...s, runningTurnId: null } : s))
+      await write($, setting, s => (s.runningTurnId === e.turnId ? { ...s, runningTurnId: null } : s))
     }
 
     return next(e)
@@ -226,7 +231,7 @@ export const register: Register = (on, options) => {
   // tool of a response whose earlier tools ran one after another.
   on('turn.step', async function* ($, e, next) {
     if (e.agentId !== undefined || !(await load($)).isPaused) return yield* next(e)
-    await stop($, e.turnId)
+    await stop($, setting, e.turnId)
 
     return { turnId: e.turnId, index: e.index, answer: '', toolUses: [], stopReason: null, usage: null }
   })
@@ -235,7 +240,7 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return next(e)
     const s = await load($)
     if (!s.isPaused || s.runningTurnId === null) return next(e)
-    await stop($, s.runningTurnId)
+    await stop($, setting, s.runningTurnId)
 
     return { deny: 'Paused.' }
   })
