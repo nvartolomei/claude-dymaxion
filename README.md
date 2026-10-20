@@ -1,8 +1,20 @@
 # claude-dymaxion
 
-A Claude Code plugin that pauses Claude at its next step without adding anything to the conversation. It can also pause when your quota runs low and resume when the quota resets.
+Buckminster Fuller's Dymaxion sleep schedule, now for Claude Code. Dymaxion sleep is [polyphasic](https://en.wikipedia.org/wiki/Polyphasic_sleep): instead of one long night, you take four 30-minute naps a day, one every six hours. Fuller gave it up because his business associates kept normal hours. Claude doesn't have that problem.
 
-Named after Buckminster Fuller's Dymaxion sleep schedule: four 30-minute naps a day.
+This plugin puts Claude to sleep when your quota runs low and wakes it up once the quota resets. You can also pause Claude yourself with `/pause`. It stops at the next step without adding anything to the conversation, and stays paused until you send a prompt.
+
+## Use
+
+| Command | What it does |
+| --- | --- |
+| `/pause limit 90 resume` | Pauses this session when the 5-hour or weekly window reaches 90%, and resumes on its own when the window resets. |
+| `/pause limit 90` | Same, but stays paused until you send a prompt. |
+| `/pause limit off` | Turns off the quota pause for this session. |
+| `/pause until-reset [prompt]` | Pauses until the most-used quota window resets, then sends `prompt`, or the resume prompt below. Use it when a session waits on you at the limit. |
+| `/pause` | Lets the running tool finish, then stops before the next model request or tool call. Claude stays paused until you send a prompt; notices from background agents wait until then. |
+| `/pause compact` | Pauses, then compacts the conversation while the prompt cache is warm. |
+| `/pause status` | Shows whether the session is paused, its quota limit, and how much of each quota window is used. |
 
 ## Install
 
@@ -21,18 +33,6 @@ claude plugin install dymaxion --marketplace nvartolomei/claude-dymaxion
 ```
 
 In the desktop app: click + next to the prompt box and choose Plugins. Click Add marketplace, enter `nvartolomei/claude-dymaxion`, then click Add plugin.
-
-## Use
-
-| Command | What it does |
-| --- | --- |
-| `/pause` | Lets the running tool finish, then stops before the next model request or tool call. Claude stays paused until you send a prompt; notices from background agents wait until then. |
-| `/pause compact` | Pauses, then compacts the conversation while the prompt cache is warm. |
-| `/pause status` | Shows whether the session is paused, its quota limit, and how much of each quota window is used. |
-| `/pause until-reset [prompt]` | Pauses until the most-used quota window resets, then sends `prompt`, or the resume prompt below. Use it when a session waits on you at the limit. |
-| `/pause limit 90` | Pauses this session when the 5-hour or weekly window reaches 90%. |
-| `/pause limit 90 resume` | Same, and resumes on its own when the window resets. |
-| `/pause limit off` | Turns off the quota pause for this session. |
 
 ## Settings
 
