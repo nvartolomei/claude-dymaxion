@@ -1,5 +1,5 @@
-/** When the session pauses for quota: at `percent` of a window (0: never), resuming at its reset or not. */
-export type Quota = { percent: number; isResuming: boolean }
+/** When the session pauses for quota: at `percent` of a window (0: never), whether it compacts, and whether it resumes at the reset. */
+export type Quota = { percent: number; isResuming: boolean; isCompacting: boolean }
 
 export type Pause = {
   isPaused: boolean

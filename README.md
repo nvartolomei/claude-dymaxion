@@ -10,6 +10,7 @@ This plugin puts Claude to sleep when your quota runs low and wakes it up once t
 | --- | --- |
 | `/pause limit 90 resume` | Pauses this session when the 5-hour or weekly window reaches 90%, and resumes on its own when the window resets. |
 | `/pause limit 90` | Same, but stays paused until you send a prompt. |
+| `/pause limit 90 [resume] compact` | Also compacts the conversation when the limit pauses the session, while the prompt cache is warm. |
 | `/pause limit off` | Turns off the quota pause for this session. |
 | `/pause until-reset [prompt]` | Pauses until the most-used quota window resets, then sends `prompt`, or the resume prompt below. Use it when a session waits on you at the limit. |
 | `/pause` | Lets the running tool finish, then stops before the next model request or tool call. Claude stays paused until you send a prompt; notices from background agents wait until then. |
@@ -42,6 +43,7 @@ Set these with `/plugin configure dymaxion@claude-dymaxion` to apply them to eve
 | --- | --- | --- |
 | `quotaLimit` | 0 (off) | Pauses when a quota window reaches this percent. |
 | `quotaResume` | Off | Resumes when the window that caused the pause resets. |
+| `quotaCompact` | Off | Compacts the conversation when a quota pause starts. |
 
 ## Notes
 

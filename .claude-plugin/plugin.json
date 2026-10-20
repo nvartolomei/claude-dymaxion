@@ -18,6 +18,12 @@
       "title": "Resume when the quota resets",
       "description": "After a quota pause, send a prompt to continue once the window that paused the session resets.",
       "default": false
+    },
+    "quotaCompact": {
+      "type": "boolean",
+      "title": "Compact on a quota pause",
+      "description": "When a quota pause starts, compact the conversation while the prompt cache is warm.",
+      "default": false
     }
   }
 }

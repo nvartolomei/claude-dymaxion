@@ -3,12 +3,13 @@ import type { EngineInterface, Register, SessionRateLimit } from 'claude-code'
 import type { Pause, Quota } from '../types'
 
 const PERSON_ORIGINS: ReadonlySet<string> = new Set(['composer', 'bridge', 'slack-ping'])
-const USAGE = 'Usage: /pause [compact | status | until-reset [<prompt>]], or /pause limit [<percent> [resume] | off]'
+const USAGE = 'Usage: /pause [compact | status | until-reset [<prompt>]], or /pause limit [<percent> [resume] [compact] | off]'
 const WINDOW_NAMES: Readonly<Record<string, string>> = { five_hour: '5-hour', seven_day: 'weekly' }
 const RESUME_PROMPT = 'The quota window has reset. Continue where you left off.'
 // The reset time is the server's; the margin keeps the resumed turn past it.
 const RESUME_MARGIN_MS = 60_000
 const RESUME_POLL_MS = 60_000
+const LIMIT_MODES: ReadonlySet<string> = new Set(['resume', 'compact'])
 
 // Held by the host, so the pause outlives a reload of this module.
 const pause = atom({ plugin: 'dymaxion', key: 'state' } as const, {
@@ -52,7 +53,12 @@ function resetOf(windows: readonly SessionRateLimit[]) {
 
 function quotaText(q: Quota) {
   if (q.percent <= 0) return 'does not pause for quota'
-  return `pauses at ${q.percent}% of a quota window${q.isResuming ? ' and resumes when it resets' : ''}`
+  const actions = [
+    `pauses at ${q.percent}% of a quota window`,
+    ...(q.isCompacting ? ['compacts'] : []),
+    ...(q.isResuming ? ['resumes when it resets'] : []),
+  ]
+  return actions.length < 3 ? actions.join(' and ') : `${actions.slice(0, -1).join(', ')}, and ${actions.at(-1)}`
 }
 
 function isRunning(s: Pause) {
@@ -85,6 +91,11 @@ async function stop($: EngineInterface, setting: Quota, turnId: string) {
   if (before.abortedTurnId !== turnId) await $.turn.abort({ turnId })
 }
 
+// Queued until the session is idle: it runs once the turn stops, while the prompt cache is warm.
+function compactWhenIdle($: EngineInterface) {
+  $.clock.after(0, () => void $.command.run({ command: 'compact' }))
+}
+
 async function resumeIfDue($: EngineInterface, setting: Quota) {
   const now = await $.clock.now()
   const s = await load($)
@@ -111,13 +122,18 @@ async function runUntilReset($: EngineInterface, setting: Quota, prompt: string)
 }
 
 async function runLimit($: EngineInterface, args: readonly string[], setting: Quota) {
-  const [value, mode, ...rest] = args
+  const [value, ...modes] = args
   if (value === undefined) return { text: `This session ${quotaText((await load($)).sessionQuota ?? setting)}.` }
   const percent = value === 'off' ? 0 : Number(value)
-  const isResuming = mode === 'resume'
-  const isValid = percent >= 0 && percent <= 100 && rest.length === 0 && (mode === undefined || (isResuming && percent > 0))
+  const isValid =
+    percent >= 0 &&
+    percent <= 100 &&
+    (modes.length === 0 || percent > 0) &&
+    modes.every(m => LIMIT_MODES.has(m)) &&
+    new Set(modes).size === modes.length
   if (!isValid) return { text: USAGE }
-  const quota = { percent, isResuming }
+  const isResuming = modes.includes('resume')
+  const quota = { percent, isResuming, isCompacting: modes.includes('compact') }
   await write($, setting, s => ({ ...s, sessionQuota: quota, resume: isResuming ? s.resume : null }))
 
   return { text: `This session ${quotaText(quota)}.` }
@@ -151,13 +167,14 @@ export const register: Register = (on, options) => {
   const setting: Quota = {
     percent: typeof options.quotaLimit === 'number' ? options.quotaLimit : 0,
     isResuming: options.quotaResume === true,
+    isCompacting: options.quotaCompact === true,
   }
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'pause',
       description: 'Stop once the running tool finishes and stay paused until you send a prompt',
-      argumentHint: '[compact | status | until-reset [prompt] | limit <percent> [resume] | limit off]',
+      argumentHint: '[compact | status | until-reset [prompt] | limit <percent> [resume] [compact] | limit off]',
       immediate: true,
     })
     // After a reload, show the pause the host still holds.
@@ -178,8 +195,7 @@ export const register: Register = (on, options) => {
     const isCompacting = verb === 'compact'
 
     const { after } = await write($, setting, paused)
-    // Queued until the session is idle: it runs once the turn stops, while the prompt cache is warm.
-    if (isCompacting) $.clock.after(0, () => void $.command.run({ command: 'compact' }))
+    if (isCompacting) compactWhenIdle($)
     if (!isRunning(after)) {
       return { text: isCompacting ? 'Paused; compacting now.' : 'Paused until you send a prompt.' }
     }
@@ -194,7 +210,7 @@ export const register: Register = (on, options) => {
   // A window pauses the session when it reaches the limit, which is off unless
   // set. Once the session resumes, the same window pauses it again only after
   // it has reset. A pause holding for the person's prompt keeps holding; one
-  // that resumes on its own waits for this window too.
+  // that resumes on its own waits for this window too. Only a new pause compacts.
   on('session.measure', async ($, e, next) => {
     const now = await $.clock.now()
     const { before, after } = await write($, setting, s => {
@@ -210,6 +226,7 @@ export const register: Register = (on, options) => {
 
       return { ...paused(t), resume: quota.isResuming && at !== null ? { at, prompt: RESUME_PROMPT } : null }
     })
+    if (!before.isPaused && after.isPaused && (after.sessionQuota ?? setting).isCompacting) compactWhenIdle($)
     const reached = atLimit(e.rateLimits, before.sessionQuota ?? setting).find(
       w => !before.windowsAtLimit.includes(w.kind),
     )

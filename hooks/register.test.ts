@@ -344,6 +344,44 @@ test('a manual /pause holds through a quota pause that would resume', RESUME_90,
   expect(seen.prompts).toEqual([])
 })
 
+test('/pause limit 90 compact compacts when the limit pauses the session', async ($, on) => {
+  const seen = engine(on)
+
+  expect((await pause($, 'limit 90 compact')).text).toBe('This session pauses at 90% of a quota window and compacts.')
+  await turn($, 't1', { kind: 'composer' })
+  await measure($, 90)
+  await step($, { turnId: 't1', index: 0, ...STEP })
+  await seen.clock.settle()
+  expect(seen.requests).toBe(0)
+  expect(seen.commands).toEqual(['compact'])
+})
+
+const COMPACT_RESUME_90 = { options: { quotaLimit: 90, quotaResume: true, quotaCompact: true } }
+
+test('with compact on, a quota pause compacts and then resumes', COMPACT_RESUME_90, async ($, on) => {
+  const seen = engine(on)
+  await start($)
+
+  expect((await pause($, 'limit')).text).toBe(
+    'This session pauses at 90% of a quota window, compacts, and resumes when it resets.',
+  )
+  await measure($, 90, T0 + HOUR)
+  await seen.clock.settle()
+  expect(seen.commands).toEqual(['compact'])
+  await seen.clock.advance(HOUR + 2 * MINUTE)
+  expect(seen.prompts).toEqual([RESUME_PROMPT])
+})
+
+test('with compact on, a pause already held does not compact', COMPACT_RESUME_90, async ($, on) => {
+  const seen = engine(on)
+  await start($)
+
+  await pause($)
+  await measure($, 90, T0 + HOUR)
+  await seen.clock.settle()
+  expect(seen.commands).toEqual([])
+})
+
 test('the status line shows a quota limit that resumes, and when a pause resumes', RESUME_90, async ($, on) => {
   const seen = engine(on)
   await start($)
@@ -393,9 +431,9 @@ test('/pause rejects unknown arguments', async ($, on) => {
   engine(on)
 
   await turn($, 't1', { kind: 'composer' })
-  const invalid = ['now', 'resume', 'compact now', 'status now', 'limit high', 'limit 120', 'limit 95 now', 'limit off resume']
+  const invalid = ['now', 'resume', 'compact now', 'status now', 'limit high', 'limit 120', 'limit 95 now', 'limit off resume', 'limit off compact', 'limit 90 resume resume']
   for (const args of invalid) {
-    expect((await pause($, args)).text).toBe('Usage: /pause [compact | status | until-reset [<prompt>]], or /pause limit [<percent> [resume] | off]')
+    expect((await pause($, args)).text).toBe('Usage: /pause [compact | status | until-reset [<prompt>]], or /pause limit [<percent> [resume] [compact] | off]')
   }
   expect((await $.tool.call(BASH)).deny).toBeUndefined()
 })
